@@ -131,9 +131,20 @@ function verifyGoogleToken(body) {
   return null;
 }
 
-// Run this once from the Apps Script editor (Run -> setPasswordFromPrompt)
-// to set or change the shared admin password. Prompts in a dialog so the
-// plaintext never has to be typed into a file that could be saved or committed.
+// getUi() (and therefore setPasswordFromPrompt below) only works when
+// triggered from a menu click inside the actual Sheet — never from the
+// Apps Script editor's own Run button, which has no Sheet UI to attach a
+// dialog to. This menu is what makes that possible: open the Sheet itself
+// (not the script editor), reload the tab if you just pasted this script in,
+// then use Sheet menu bar -> SSP Rota -> Set admin password.
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu("SSP Rota").addItem("Set admin password", "setPasswordFromPrompt").addToUi();
+}
+
+// Run via the Sheet's "SSP Rota" menu (see onOpen above) — not the Apps
+// Script editor's Run button — to set or change the shared admin password.
+// Prompts in a dialog so the plaintext never has to be typed into a file
+// that could be saved or committed.
 function setPasswordFromPrompt() {
   const ui = SpreadsheetApp.getUi();
   const resp = ui.prompt("Set SSP Rota admin password", "New password:", ui.ButtonSet.OK_CANCEL);
