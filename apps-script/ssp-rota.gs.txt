@@ -388,7 +388,7 @@ function handleGenerateRota(body) {
     availability[r.date] = availability[r.date] || {};
     availability[r.date][r.personId] = r.level;
   });
-  const levelOf = (date, personId) => (availability[date] && availability[date][personId]) || "maybe";
+  const levelOf = (date, personId) => (availability[date] && availability[date][personId]) || "unavailable";
 
   const results = [];
   const seenKeys = new Set();

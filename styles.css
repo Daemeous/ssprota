@@ -166,22 +166,34 @@ th { color: var(--muted); font-weight: 600; white-space: nowrap; }
 .calendar-grid .day.no-duty .names { color: var(--muted); font-style: italic; }
 
 .avail-grid-wrap { overflow-x: auto; }
-.avail-cell {
+select.avail-cell {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
   display: inline-block;
-  min-width: 5.5rem;
-  padding: 0.3rem 0.5rem;
+  width: 100%;
+  min-width: 6.5rem;
+  min-height: 44px;
+  padding: 0.3rem 1.6rem 0.3rem 0.5rem;
+  border: none;
   border-radius: 6px;
   cursor: pointer;
   text-align: center;
-  color: white;
+  text-align-last: center;
   font-size: 0.8rem;
-  user-select: none;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: right 0.7rem top 55%, right 0.45rem top 55%;
+  background-size: 6px 6px, 6px 6px;
+  background-repeat: no-repeat;
 }
-.lvl-available { background: var(--lvl-available); }
+select.avail-cell option { color: #14142b; background: #ffffff; }
+/* Text colour lives on .lvl-* (not select.avail-cell) so specificity ties
+   break in favour of whichever level applies, same as the background. */
+.lvl-available { background: var(--lvl-available); color: white; }
 .lvl-maybe { background: var(--lvl-maybe); color: #2a2200; }
-.lvl-reluctant { background: var(--lvl-reluctant); }
-.lvl-unavailable { background: var(--lvl-unavailable); }
-.lvl-forced { background: var(--lvl-forced); }
+.lvl-reluctant { background: var(--lvl-reluctant); color: white; }
+.lvl-unavailable { background: var(--lvl-unavailable); color: white; }
+.lvl-forced { background: var(--lvl-forced); color: white; }
 
 .legend { display: flex; gap: 0.75rem; flex-wrap: wrap; font-size: 0.8rem; margin: 0.5rem 0 1rem; }
 .legend span.swatch { display: inline-block; width: 0.8rem; height: 0.8rem; border-radius: 3px; margin-right: 0.3rem; vertical-align: -1px; }
@@ -236,5 +248,5 @@ th { color: var(--muted); font-weight: 600; white-space: nowrap; }
   .rota-list-row { flex-direction: column; }
   .rota-list-row .names { text-align: left; }
   th, td { padding: 0.35rem 0.4rem; font-size: 0.8rem; }
-  .avail-cell { min-width: 4.5rem; font-size: 0.75rem; }
+  select.avail-cell { min-width: 4.5rem; font-size: 0.75rem; }
 }

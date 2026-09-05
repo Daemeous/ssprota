@@ -3,7 +3,8 @@
   const CFG = window.SSP_CONFIG || {};
   const APPS_SCRIPT_URL = CFG.APPS_SCRIPT_URL;
   const LEVELS = ["available", "maybe", "reluctant", "unavailable", "forced"];
-  const LEVEL_LABEL = { available: "Available", maybe: "Maybe", reluctant: "Prefer not to", unavailable: "Unavailable", forced: "Forced" };
+  const LEVEL_LABEL = { available: "Available", maybe: "Maybe", reluctant: "Prefer not to", unavailable: "Unavailable", forced: "Locked in" };
+  const DEFAULT_LEVEL = "unavailable";
   const LS_TOKEN_KEY = "sspRotaSessionToken";
 
   const state = {
@@ -272,8 +273,9 @@
     state.people.filter(p => p.active).forEach(p => {
       tbody += `<tr><td>${escapeHtml(p.name)}</td>`;
       dates.forEach(date => {
-        const level = (state.availability[date] && state.availability[date][p.id]) || "maybe";
-        tbody += `<td><span class="avail-cell lvl-${level}" data-person="${p.id}" data-date="${date}">${LEVEL_LABEL[level]}</span></td>`;
+        const level = (state.availability[date] && state.availability[date][p.id]) || DEFAULT_LEVEL;
+        const options = LEVELS.map(l => `<option value="${l}" ${l === level ? "selected" : ""}>${LEVEL_LABEL[l]}</option>`).join("");
+        tbody += `<td><select class="avail-cell lvl-${level}" data-person="${p.id}" data-date="${date}">${options}</select></td>`;
       });
       tbody += "</tr>";
     });
@@ -281,24 +283,23 @@
     table.innerHTML = thead + tbody;
 
     table.querySelectorAll(".avail-cell").forEach(cell => {
-      cell.addEventListener("click", () => {
-        const date = cell.dataset.date, person = cell.dataset.person;
-        const cur = (state.availability[date] && state.availability[date][person]) || "maybe";
-        const next = LEVELS[(LEVELS.indexOf(cur) + 1) % LEVELS.length];
+      cell.addEventListener("change", () => {
+        const date = cell.dataset.date, person = cell.dataset.person, next = cell.value;
         state.availability[date] = state.availability[date] || {};
         state.availability[date][person] = next;
         cell.className = `avail-cell lvl-${next}`;
-        cell.textContent = LEVEL_LABEL[next];
       });
     });
   }
 
   document.getElementById("saveAvailabilityBtn").addEventListener("click", async () => {
+    // Read every rendered cell, not just state.availability — that only holds
+    // entries loaded from the server plus ones the admin touched this
+    // session, but an untouched cell's on-screen default (unavailable) needs
+    // saving too, or it silently reverts to "maybe" server-side next load.
     const entries = [];
-    Object.keys(state.availability).forEach(date => {
-      Object.keys(state.availability[date]).forEach(personId => {
-        entries.push({ date, personId, level: state.availability[date][personId] });
-      });
+    document.querySelectorAll("#availTable .avail-cell").forEach(cell => {
+      entries.push({ date: cell.dataset.date, personId: cell.dataset.person, level: cell.value });
     });
     const data = await api("saveAvailability", { month: state.month, entries });
     showMsg("globalMsg", data.ok ? "Availability saved." : data.error, data.ok ? "success" : "error");
