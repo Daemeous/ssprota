@@ -15,13 +15,13 @@ One-time setup to stand up the backend this site talks to.
 
    Leave `ADMIN_EMAILS` blank if you're only using the shared password to sign in — Google sign-in and the shared password are independent, either gets you in.
 
-4. **Set the shared admin password — from the Sheet itself, not the script editor.** `setPasswordFromPrompt` needs to open a dialog box, which only works when it's triggered from inside the actual Google Sheet's menu bar — running it via the Apps Script editor's "Run" button fails with `Cannot call SpreadsheetApp.getUi() from this context`, since the editor has no Sheet UI to attach a dialog to.
+4. **Set the shared admin password — from the Sheet itself, not the script editor.** `setPasswordFromPrompt` needs to open a dialog box, which only works when it's triggered from inside the actual Google Sheet's menu bar — running it (or `onOpen`) via the Apps Script editor's "Run" button always fails with `Cannot call SpreadsheetApp.getUi() from this context`, since the editor has no Sheet UI to attach a dialog to. Don't try to run anything from the editor for this step.
 
-   1. First, back in the Apps Script editor, run it once anyway (function dropdown next to "Debug" → `onOpen` → Run) — not to use it, just so Google prompts you to **authorise the script** (it needs to read/write this Sheet and call Google's token-info endpoint). Approve that now, so the real run below doesn't get interrupted by it.
-   2. Switch to the actual Google Sheet tab (not the script editor) and reload the page. A new **"SSP Rota"** menu appears in the menu bar, next to Help.
-   3. Click **SSP Rota → Set admin password**. A dialog box asks for the new password; type it there.
+   1. Switch to the actual Google Sheet tab in your browser (not the script editor) and reload the page. `onOpen` fires automatically on open — you'll see a new **"SSP Rota"** menu appear in the menu bar, next to Help.
+   2. Click **SSP Rota → Set admin password**. The very first time you use it, Google will likely interrupt with an **"Authorization required"** popup (the script needs permission to read/write this Sheet) — click through it and allow access, then click the menu item again.
+   3. A dialog box asks for the new password; type it there.
 
-   The password itself is never written to any file — only a salted hash is stored in the script's own Properties. Repeat step 4.3 any time you want to change the password; you only need to redo 4.1/4.2 once, ever.
+   The password itself is never written to any file — only a salted hash is stored in the script's own Properties. Repeat step 4.2–4.3 any time you want to change the password.
 
 5. **Deploy as a web app.** Deploy → New deployment → type: **Web app**. Execute as **Me**, who has access: **Anyone**. Copy the resulting web app URL — this is `APPS_SCRIPT_URL` in `index.html`'s config block.
 
