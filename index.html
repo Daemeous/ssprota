@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5">
 <title>SSP Rota</title>
 <link rel="stylesheet" href="styles.css?v=1">
 <script>
@@ -64,10 +64,12 @@
           <label><input type="checkbox" id="personDriver"> Driver</label>
           <button class="btn" id="addPersonBtn">Add person</button>
         </div>
-        <table id="peopleTable">
-          <thead><tr><th>Name</th><th>Gender</th><th>Leader</th><th>Driver</th><th>Active</th><th></th></tr></thead>
-          <tbody></tbody>
-        </table>
+        <div class="table-scroll">
+          <table id="peopleTable">
+            <thead><tr><th>Name</th><th>Gender</th><th>Leader</th><th>Driver</th><th>Active</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
     </section>
 
