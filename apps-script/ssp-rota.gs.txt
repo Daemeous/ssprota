@@ -1,0 +1,558 @@
+// SSP Rota — Apps Script backend.
+// Copy this file's contents into the Apps Script project bound to the rota
+// Google Sheet (Extensions -> Apps Script), replacing Code.gs. See SETUP.md
+// for creating the sheet, the two Script Properties this needs, and
+// deploying it as a web app.
+
+// ── Config ───────────────────────────────────────────────────────────────
+// Google sign-in path: only these emails may act as admin. Comma-separated,
+// case-insensitive. Set via Script Properties (Project Settings -> Script
+// Properties -> ADMIN_EMAILS) rather than hardcoding, so granting/revoking
+// access never needs a code push.
+const ADMIN_EMAILS = (PropertiesService.getScriptProperties().getProperty("ADMIN_EMAILS") || "")
+  .split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+
+// Google Sign-In audience check, same reasoning as leaflet-map: without it,
+// any valid Google ID token for an admin's email — even one minted for a
+// completely different app — would pass.
+const GOOGLE_CLIENT_ID = PropertiesService.getScriptProperties().getProperty("GOOGLE_CLIENT_ID") || "";
+
+// Shared-password path. Only a salted SHA-256 hash lives here (Script
+// Property PASSWORD_HASH_SALTED, format "salt:hash"), never the password
+// itself — set it by running setPasswordFromPrompt() once from the Apps
+// Script editor (see SETUP.md). Never put the plaintext password in code,
+// the Sheet, or the frontend.
+const PASSWORD_PROPERTY = "PASSWORD_HASH_SALTED";
+
+const SESSION_TTL_SECONDS = 6 * 60 * 60; // 6 hours
+const BANK_HOLIDAY_CACHE_SECONDS = 6 * 60 * 60; // CacheService max
+
+const PEOPLE_SHEET = "People";
+const AVAILABILITY_SHEET = "Availability";
+const DUTY_DAYS_SHEET = "DutyDays";
+const ASSIGNMENTS_SHEET = "Assignments";
+const CHANGELOG_SHEET = "Changelog";
+
+const LEVELS = ["available", "maybe", "reluctant", "unavailable", "forced"];
+const MAX_PER_MONTH_DEFAULT = 2;
+
+// ── POST handler ─────────────────────────────────────────────────────────
+function doPost(e) {
+  try {
+    const body = JSON.parse(e.postData.contents);
+    const session = body.sessionToken ? getSession(body.sessionToken) : null;
+    const requiresAuth = !["loginGoogle", "loginPassword"].includes(body.action);
+    if (requiresAuth && !session) return jsonResp({ ok: false, error: "Not signed in" });
+
+    switch (body.action) {
+      case "loginGoogle": return handleLoginGoogle(body);
+      case "loginPassword": return handleLoginPassword(body);
+      case "logout": return handleLogout(body);
+
+      case "getPeople": return handleGetPeople();
+      case "savePerson": return handleSavePerson(body, session);
+      case "deletePerson": return handleDeletePerson(body, session);
+
+      case "getDefaultDutyDays": return handleGetDefaultDutyDays(body);
+      case "getDutyDays": return handleGetDutyDays(body);
+      case "saveDutyDays": return handleSaveDutyDays(body, session);
+
+      case "getAvailability": return handleGetAvailability(body);
+      case "saveAvailability": return handleSaveAvailability(body, session);
+
+      case "generateRota": return handleGenerateRota(body);
+      case "getAssignments": return handleGetAssignments(body);
+      case "commitAssignments": return handleCommitAssignments(body, session);
+      case "setAssignment": return handleSetAssignment(body, session);
+
+      default: return jsonResp({ ok: false, error: "Unknown action" });
+    }
+  } catch (err) {
+    return jsonResp({ ok: false, error: err.message });
+  }
+}
+
+// ── Auth ─────────────────────────────────────────────────────────────────
+function handleLoginGoogle(body) {
+  if (!GOOGLE_CLIENT_ID) return jsonResp({ ok: false, error: "Server misconfigured: GOOGLE_CLIENT_ID script property not set." });
+  const email = verifyGoogleToken(body);
+  if (!email) return jsonResp({ ok: false, error: "Invalid or expired Google token" });
+  if (!ADMIN_EMAILS.includes(email)) return jsonResp({ ok: false, error: "This Google account is not an authorised admin." });
+  return jsonResp({ ok: true, sessionToken: createSession("google:" + email) });
+}
+
+function handleLoginPassword(body) {
+  const stored = PropertiesService.getScriptProperties().getProperty(PASSWORD_PROPERTY);
+  if (!stored) return jsonResp({ ok: false, error: "Server misconfigured: no password set. Run setPasswordFromPrompt() in the Apps Script editor." });
+  const [salt, hash] = stored.split(":");
+  const candidateHash = hashPassword(String(body.password || ""), salt);
+  if (candidateHash !== hash) return jsonResp({ ok: false, error: "Incorrect password" });
+  return jsonResp({ ok: true, sessionToken: createSession("password:admin") });
+}
+
+function handleLogout(body) {
+  if (body.sessionToken) CacheService.getScriptCache().remove("session:" + body.sessionToken);
+  return jsonResp({ ok: true });
+}
+
+function createSession(identity) {
+  const token = Utilities.getUuid();
+  CacheService.getScriptCache().put("session:" + token, identity, SESSION_TTL_SECONDS);
+  return token;
+}
+
+function getSession(token) {
+  const identity = CacheService.getScriptCache().get("session:" + token);
+  return identity || null;
+}
+
+function verifyGoogleToken(body) {
+  try {
+    if (body.idToken) {
+      const res = UrlFetchApp.fetch("https://oauth2.googleapis.com/tokeninfo?id_token=" + body.idToken, { muteHttpExceptions: true });
+      if (res.getResponseCode() !== 200) return null;
+      const info = JSON.parse(res.getContentText());
+      if (info.error || !info.email_verified || info.aud !== GOOGLE_CLIENT_ID) return null;
+      return info.email.toLowerCase();
+    }
+    if (body.accessToken) {
+      const tiRes = UrlFetchApp.fetch("https://oauth2.googleapis.com/tokeninfo?access_token=" + body.accessToken, { muteHttpExceptions: true });
+      if (tiRes.getResponseCode() !== 200) return null;
+      const tiInfo = JSON.parse(tiRes.getContentText());
+      if (tiInfo.error || tiInfo.aud !== GOOGLE_CLIENT_ID) return null;
+      const res = UrlFetchApp.fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+        headers: { Authorization: "Bearer " + body.accessToken }, muteHttpExceptions: true
+      });
+      if (res.getResponseCode() !== 200) return null;
+      const info = JSON.parse(res.getContentText());
+      return info.email ? info.email.toLowerCase() : null;
+    }
+  } catch (e) { /* fall through to null */ }
+  return null;
+}
+
+// Run this once from the Apps Script editor (Run -> setPasswordFromPrompt)
+// to set or change the shared admin password. Prompts in a dialog so the
+// plaintext never has to be typed into a file that could be saved or committed.
+function setPasswordFromPrompt() {
+  const ui = SpreadsheetApp.getUi();
+  const resp = ui.prompt("Set SSP Rota admin password", "New password:", ui.ButtonSet.OK_CANCEL);
+  if (resp.getSelectedButton() !== ui.Button.OK) return;
+  const password = resp.getResponseText();
+  if (!password) { ui.alert("Empty password — not changed."); return; }
+  const salt = Utilities.getUuid();
+  const hash = hashPassword(password, salt);
+  PropertiesService.getScriptProperties().setProperty(PASSWORD_PROPERTY, salt + ":" + hash);
+  ui.alert("Password updated.");
+}
+
+function hashPassword(password, salt) {
+  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, salt + ":" + password);
+  return digest.map(b => (b < 0 ? b + 256 : b).toString(16).padStart(2, "0")).join("");
+}
+
+// ── People ───────────────────────────────────────────────────────────────
+function handleGetPeople() {
+  const sheet = getSheet(PEOPLE_SHEET, ["id", "name", "gender", "isLeader", "isDriver", "active"]);
+  const rows = readRows(sheet);
+  const people = rows.map(r => ({
+    id: r.id, name: r.name, gender: r.gender,
+    isLeader: truthy(r.isLeader), isDriver: truthy(r.isDriver), active: truthy(r.active)
+  }));
+  return jsonResp({ ok: true, people });
+}
+
+function handleSavePerson(body, session) {
+  const p = body.person || {};
+  if (!String(p.name || "").trim()) return jsonResp({ ok: false, error: "Name is required" });
+
+  const sheet = getSheet(PEOPLE_SHEET, ["id", "name", "gender", "isLeader", "isDriver", "active"]);
+  const rows = readRows(sheet);
+  const id = p.id || Utilities.getUuid();
+  const idx = rows.findIndex(r => r.id === id);
+  const record = [id, p.name.trim(), p.gender || "", !!p.isLeader, !!p.isDriver, p.active !== false];
+
+  if (idx === -1) {
+    sheet.appendRow(record);
+  } else {
+    sheet.getRange(idx + 2, 1, 1, record.length).setValues([record]);
+  }
+  logChange("savePerson", id + " " + p.name, session);
+  return jsonResp({ ok: true, id });
+}
+
+function handleDeletePerson(body, session) {
+  const sheet = getSheet(PEOPLE_SHEET, ["id", "name", "gender", "isLeader", "isDriver", "active"]);
+  const rows = readRows(sheet);
+  const idx = rows.findIndex(r => r.id === body.id);
+  if (idx === -1) return jsonResp({ ok: false, error: "Person not found" });
+  sheet.deleteRow(idx + 2);
+  logChange("deletePerson", body.id, session);
+  return jsonResp({ ok: true });
+}
+
+// ── Duty days ────────────────────────────────────────────────────────────
+// Default duty nights for a month: every Saturday, the final Friday, and
+// any Sunday immediately before a bank-holiday Monday (England & Wales).
+// Purely a starting suggestion — saveDutyDays lets the admin override which
+// of these (or any other date) is actually active.
+function handleGetDefaultDutyDays(body) {
+  const month = String(body.month); // "YYYY-MM"
+  const [year, mon] = month.split("-").map(Number);
+  const dates = [];
+
+  const daysInMonth = new Date(year, mon, 0).getDate();
+  for (let d = 1; d <= daysInMonth; d++) {
+    const date = new Date(year, mon - 1, d);
+    if (date.getDay() === 6) dates.push(isoDate(date)); // Saturday
+  }
+  let lastFriday = null;
+  for (let d = daysInMonth; d >= 1; d--) {
+    const date = new Date(year, mon - 1, d);
+    if (date.getDay() === 5) { lastFriday = isoDate(date); break; }
+  }
+  if (lastFriday && !dates.includes(lastFriday)) dates.push(lastFriday);
+
+  const bankHolidayMondays = getBankHolidayMondays();
+  for (let d = 1; d <= daysInMonth; d++) {
+    const date = new Date(year, mon - 1, d);
+    if (date.getDay() !== 0) continue; // Sunday
+    const nextDay = new Date(year, mon - 1, d + 1);
+    if (bankHolidayMondays.has(isoDate(nextDay)) && !dates.includes(isoDate(date))) dates.push(isoDate(date));
+  }
+
+  dates.sort();
+  return jsonResp({ ok: true, dates });
+}
+
+function getBankHolidayMondays() {
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get("bankHolidayMondays");
+  if (cached) return new Set(JSON.parse(cached));
+
+  const mondays = [];
+  try {
+    const res = UrlFetchApp.fetch("https://www.gov.uk/bank-holidays.json", { muteHttpExceptions: true });
+    if (res.getResponseCode() === 200) {
+      const data = JSON.parse(res.getContentText());
+      const events = (data["england-and-wales"] || {}).events || [];
+      events.forEach(ev => {
+        const d = new Date(ev.date + "T00:00:00");
+        if (d.getDay() === 1) mondays.push(ev.date);
+      });
+    }
+  } catch (e) { /* network hiccup — fall back to no bank-holiday suggestions this call */ }
+
+  cache.put("bankHolidayMondays", JSON.stringify(mondays), BANK_HOLIDAY_CACHE_SECONDS);
+  return new Set(mondays);
+}
+
+function handleGetDutyDays(body) {
+  const sheet = getSheet(DUTY_DAYS_SHEET, ["month", "date", "active"]);
+  const rows = readRows(sheet).filter(r => r.month === body.month);
+  return jsonResp({ ok: true, dutyDays: rows.map(r => ({ date: r.date, active: truthy(r.active) })) });
+}
+
+function handleSaveDutyDays(body, session) {
+  const month = String(body.month);
+  const dates = Array.isArray(body.dates) ? body.dates : [];
+  const sheet = getSheet(DUTY_DAYS_SHEET, ["month", "date", "active"]);
+  const all = sheet.getDataRange().getValues();
+  const keep = [all[0]]; // header
+  for (let i = 1; i < all.length; i++) {
+    if (all[i][0] !== month) keep.push(all[i]);
+  }
+  dates.forEach(date => keep.push([month, date, true]));
+  sheet.clear();
+  sheet.getRange(1, 1, keep.length, 3).setValues(keep);
+  logChange("saveDutyDays", month + ": " + dates.join(","), session);
+  return jsonResp({ ok: true });
+}
+
+// ── Availability ─────────────────────────────────────────────────────────
+function handleGetAvailability(body) {
+  const sheet = getSheet(AVAILABILITY_SHEET, ["month", "date", "personId", "level"]);
+  const rows = readRows(sheet).filter(r => r.month === body.month);
+  return jsonResp({ ok: true, availability: rows.map(r => ({ date: r.date, personId: r.personId, level: r.level })) });
+}
+
+function handleSaveAvailability(body, session) {
+  const month = String(body.month);
+  const entries = Array.isArray(body.entries) ? body.entries : []; // [{date, personId, level}]
+  entries.forEach(e => {
+    if (!LEVELS.includes(e.level)) throw new Error("Invalid level: " + e.level);
+  });
+
+  const sheet = getSheet(AVAILABILITY_SHEET, ["month", "date", "personId", "level"]);
+  const all = sheet.getDataRange().getValues();
+  const keyOf = (m, d, p) => m + "|" + d + "|" + p;
+  const byKey = {};
+  const keep = [all[0]];
+  for (let i = 1; i < all.length; i++) {
+    if (all[i][0] === month) { byKey[keyOf(all[i][0], all[i][1], all[i][2])] = i; continue; }
+    keep.push(all[i]);
+  }
+  const monthMap = {};
+  entries.forEach(e => { monthMap[keyOf(month, e.date, e.personId)] = [month, e.date, e.personId, e.level]; });
+  // start from existing month rows not overwritten, then apply the new entries
+  for (let i = 1; i < all.length; i++) {
+    if (all[i][0] !== month) continue;
+    const key = keyOf(all[i][0], all[i][1], all[i][2]);
+    if (!monthMap[key]) keep.push(all[i]);
+  }
+  Object.values(monthMap).forEach(row => keep.push(row));
+
+  sheet.clear();
+  sheet.getRange(1, 1, keep.length, 4).setValues(keep);
+  logChange("saveAvailability", month + " (" + entries.length + " entries)", session);
+  return jsonResp({ ok: true });
+}
+
+// ── Assignments ──────────────────────────────────────────────────────────
+function handleGetAssignments(body) {
+  const sheet = getSheet(ASSIGNMENTS_SHEET, ["date", "personId", "source", "committedAt", "committedBy"]);
+  const rows = readRows(sheet).filter(r => r.date >= body.monthStart && r.date <= body.monthEnd);
+  return jsonResp({ ok: true, assignments: rows });
+}
+
+function handleCommitAssignments(body, session) {
+  const assignments = Array.isArray(body.assignments) ? body.assignments : []; // [{date, personId}]
+  const dates = [...new Set(assignments.map(a => a.date))];
+  const sheet = getSheet(ASSIGNMENTS_SHEET, ["date", "personId", "source", "committedAt", "committedBy"]);
+  const all = sheet.getDataRange().getValues();
+  const keep = [all[0]];
+  for (let i = 1; i < all.length; i++) {
+    if (!dates.includes(all[i][0])) keep.push(all[i]);
+  }
+  const now = new Date().toISOString();
+  assignments.forEach(a => keep.push([a.date, a.personId, a.source || "solver", now, session]));
+  sheet.clear();
+  sheet.getRange(1, 1, keep.length, 5).setValues(keep);
+  logChange("commitAssignments", dates.join(",") + " (" + assignments.length + " slots)", session);
+  return jsonResp({ ok: true });
+}
+
+// Manual single-slot tweak after commit: replace one person on one date.
+function handleSetAssignment(body, session) {
+  const date = body.date, oldPersonId = body.oldPersonId, newPersonId = body.newPersonId;
+  const sheet = getSheet(ASSIGNMENTS_SHEET, ["date", "personId", "source", "committedAt", "committedBy"]);
+  const all = sheet.getDataRange().getValues();
+  let found = false;
+  const now = new Date().toISOString();
+  for (let i = 1; i < all.length; i++) {
+    if (all[i][0] === date && all[i][1] === oldPersonId) {
+      sheet.getRange(i + 1, 1, 1, 5).setValues([[date, newPersonId, "manual", now, session]]);
+      found = true;
+      break;
+    }
+  }
+  if (!found) sheet.appendRow([date, newPersonId, "manual", now, session]);
+  logChange("setAssignment", date + ": " + oldPersonId + " -> " + newPersonId, session);
+  return jsonResp({ ok: true });
+}
+
+// ── Rota generation ──────────────────────────────────────────────────────
+// Produces up to `count` distinct, ranked candidate rotas for the given
+// duty dates. Hard requirements per date: exactly 3 distinct people, none
+// "unavailable", at least one isLeader and at least one isDriver (the same
+// person may cover both), and anyone marked "forced" for that date must be
+// included. Soft-scored (lower is better): availability level, monthly
+// duty count beyond the cap, and being on duty exactly a week after a
+// previous duty in this same run.
+function handleGenerateRota(body) {
+  const month = String(body.month);
+  const dutyDates = (Array.isArray(body.dates) ? body.dates : []).slice().sort();
+  const maxPerMonth = Number(body.maxPerMonth) || MAX_PER_MONTH_DEFAULT;
+  const candidateCount = Math.min(Number(body.count) || 5, 10);
+
+  const people = readRows(getSheet(PEOPLE_SHEET, ["id", "name", "gender", "isLeader", "isDriver", "active"]))
+    .filter(r => truthy(r.active))
+    .map(r => ({ id: r.id, name: r.name, gender: r.gender, isLeader: truthy(r.isLeader), isDriver: truthy(r.isDriver) }));
+  const peopleById = {};
+  people.forEach(p => peopleById[p.id] = p);
+
+  const availRows = readRows(getSheet(AVAILABILITY_SHEET, ["month", "date", "personId", "level"])).filter(r => r.month === month);
+  const availability = {}; // date -> personId -> level
+  availRows.forEach(r => {
+    availability[r.date] = availability[r.date] || {};
+    availability[r.date][r.personId] = r.level;
+  });
+  const levelOf = (date, personId) => (availability[date] && availability[date][personId]) || "maybe";
+
+  const results = [];
+  const seenKeys = new Set();
+  const ATTEMPTS = 60;
+
+  for (let attempt = 0; attempt < ATTEMPTS && results.length < candidateCount * 4; attempt++) {
+    const built = buildCandidate(dutyDates, people, levelOf, maxPerMonth, attempt);
+    if (!built) continue;
+    const key = dutyDates.map(d => (built.assignments[d] || []).slice().sort().join(",")).join("|");
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
+    results.push(built);
+  }
+
+  results.sort((a, b) => a.penalty - b.penalty);
+  const top = results.slice(0, candidateCount).map((r, i) => ({
+    rank: i + 1,
+    penalty: r.penalty,
+    issues: r.issues,
+    dates: dutyDates.map(date => ({
+      date,
+      people: (r.assignments[date] || []).map(id => ({
+        id, name: peopleById[id] ? peopleById[id].name : "?",
+        gender: peopleById[id] ? peopleById[id].gender : "",
+        level: levelOf(date, id)
+      }))
+    }))
+  }));
+
+  return jsonResp({ ok: true, candidates: top });
+}
+
+function buildCandidate(dutyDates, people, levelOf, maxPerMonth, seed) {
+  const rng = mulberry32(seed * 2654435761 + 1);
+  const order = shuffle(dutyDates.slice(), rng);
+  const assignments = {};
+  const monthCount = {}; // personId -> duties assigned so far in this candidate
+  const lastDutyDate = {}; // personId -> most recent assigned date (ISO)
+  const issues = [];
+  let penalty = 0;
+
+  order.forEach(date => {
+    const forced = people.filter(p => levelOf(date, p.id) === "forced").map(p => p.id);
+    let picks = forced.slice(0, 3);
+
+    const candidates = people
+      .filter(p => !picks.includes(p.id))
+      .filter(p => levelOf(date, p.id) !== "unavailable")
+      .map(p => ({ p, cost: slotCost(p, date, levelOf, monthCount, lastDutyDate, maxPerMonth, rng) }))
+      .sort((a, b) => a.cost - b.cost);
+
+    while (picks.length < 3 && candidates.length) {
+      // weighted-random pick biased toward the front (lower cost) for diversity across attempts
+      const idx = Math.min(candidates.length - 1, Math.floor(rng() * rng() * candidates.length));
+      picks.push(candidates.splice(idx, 1)[0].p.id);
+    }
+
+    if (picks.length < 3) issues.push({ date, problem: "Only " + picks.length + " available person(s) for this date." });
+
+    const pickedPeople = picks.map(id => people.find(p => p.id === id)).filter(Boolean);
+    if (!pickedPeople.some(p => p.isLeader)) {
+      const swapped = trySwapForRole(picks, pickedPeople, people, date, levelOf, "isLeader");
+      if (swapped) picks = swapped; else issues.push({ date, problem: "No leader available for this date." });
+    }
+    if (!picks.map(id => people.find(p => p.id === id)).filter(Boolean).some(p => p.isDriver)) {
+      const swapped2 = trySwapForRole(picks, picks.map(id => people.find(p => p.id === id)), people, date, levelOf, "isDriver");
+      if (swapped2) picks = swapped2; else issues.push({ date, problem: "No driver available for this date." });
+    }
+
+    assignments[date] = picks;
+    picks.forEach(id => {
+      const level = levelOf(date, id);
+      penalty += levelPenalty(level);
+      monthCount[id] = (monthCount[id] || 0) + 1;
+      if (monthCount[id] > maxPerMonth) penalty += (monthCount[id] - maxPerMonth) * 8;
+      if (lastDutyDate[id] && daysBetween(lastDutyDate[id], date) === 7) penalty += 6;
+      lastDutyDate[id] = date;
+    });
+    if (!pickedPeople.concat(picks.map(id => people.find(p => p.id === id))).some(p => p && p.gender && /^f/i.test(p.gender))) {
+      penalty += 3; // soft: prefer at least one woman, but never a hard-fail
+    }
+  });
+
+  penalty += issues.length * 20; // heavily discourage candidates with unresolved hard-constraint gaps
+  return { assignments, penalty, issues };
+}
+
+function slotCost(person, date, levelOf, monthCount, lastDutyDate, maxPerMonth, rng) {
+  let cost = levelPenalty(levelOf(date, person.id));
+  const count = monthCount[person.id] || 0;
+  if (count >= maxPerMonth) cost += (count - maxPerMonth + 1) * 8;
+  if (lastDutyDate[person.id] && daysBetween(lastDutyDate[person.id], date) === 7) cost += 6;
+  return cost + rng() * 0.5; // small jitter so equal-cost ties don't always resolve the same way
+}
+
+function trySwapForRole(picks, pickedPeople, people, date, levelOf, roleFlag) {
+  const roleHolders = people.filter(p => p[roleFlag] && levelOf(date, p.id) !== "unavailable" && !picks.includes(p.id));
+  if (!roleHolders.length) return null;
+  // Replace the current pick with the highest (worst) availability penalty to make room.
+  const worstIdx = picks
+    .map((id, i) => ({ i, cost: levelPenalty(levelOf(date, id)) }))
+    .sort((a, b) => b.cost - a.cost)[0].i;
+  const replacement = roleHolders.sort((a, b) => levelPenalty(levelOf(date, a.id)) - levelPenalty(levelOf(date, b.id)))[0];
+  const next = picks.slice();
+  next[worstIdx] = replacement.id;
+  return next;
+}
+
+function levelPenalty(level) {
+  switch (level) {
+    case "available": return 0;
+    case "forced": return 0;
+    case "maybe": return 1;
+    case "reluctant": return 3;
+    case "unavailable": return 999;
+    default: return 1;
+  }
+}
+
+function daysBetween(isoA, isoB) {
+  return Math.round((new Date(isoB) - new Date(isoA)) / 86400000);
+}
+
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function shuffle(arr, rng) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+// ── Sheet helpers ────────────────────────────────────────────────────────
+function getSheet(name, header) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(name);
+  if (!sheet) {
+    sheet = ss.insertSheet(name);
+    sheet.appendRow(header);
+  }
+  return sheet;
+}
+
+function readRows(sheet) {
+  const values = sheet.getDataRange().getValues();
+  if (values.length < 2) return [];
+  const header = values[0];
+  return values.slice(1).filter(r => r.some(c => c !== "")).map(r => {
+    const obj = {};
+    header.forEach((h, i) => obj[h] = r[i]);
+    return obj;
+  });
+}
+
+function truthy(v) { return v === true || v === "TRUE" || v === "true"; }
+
+function isoDate(d) {
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+}
+
+function logChange(action, detail, session) {
+  const sheet = getSheet(CHANGELOG_SHEET, ["timestamp", "action", "detail", "actor"]);
+  sheet.appendRow([new Date().toISOString(), action, detail, session || ""]);
+}
+
+// ── Response helper ──────────────────────────────────────────────────────
+function jsonResp(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}

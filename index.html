@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SSP Rota</title>
+<link rel="stylesheet" href="styles.css?v=1">
+<script>
+  // Fill these in — see apps-script/SETUP.md.
+  window.SSP_CONFIG = {
+    APPS_SCRIPT_URL: "PASTE_APPS_SCRIPT_WEB_APP_URL_HERE",
+    GOOGLE_CLIENT_ID: "PASTE_GOOGLE_OAUTH_CLIENT_ID_HERE", // leave blank to hide the Google sign-in button
+    TITLE: "SSP Rota",
+  };
+</script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body>
+
+<div id="loginScreen" class="login-screen">
+  <h1 id="loginTitle">SSP Rota</h1>
+  <div class="panel">
+    <div id="loginMsg"></div>
+    <div id="googleSignIn"></div>
+    <hr>
+    <label for="passwordInput">Shared admin password</label>
+    <input type="password" id="passwordInput" placeholder="Password">
+    <button class="btn" id="passwordSignInBtn">Sign in</button>
+  </div>
+</div>
+
+<div id="app" class="hidden">
+  <header class="app-header">
+    <h1 id="appTitle">SSP Rota</h1>
+    <div id="signedInBar">
+      <span id="signedInAs"></span>
+      <button class="btn secondary" id="signOutBtn">Sign out</button>
+    </div>
+  </header>
+
+  <main>
+    <nav class="tabs">
+      <button data-view="people" class="active">People</button>
+      <button data-view="dutydays">Duty Days</button>
+      <button data-view="availability">Availability</button>
+      <button data-view="generate">Generate Rota</button>
+      <button data-view="rota">Rota</button>
+    </nav>
+
+    <div id="globalMsg"></div>
+
+    <section id="view-people" class="view active">
+      <div class="panel">
+        <h2>People</h2>
+        <div class="people-form">
+          <input type="text" id="personName" placeholder="Name">
+          <select id="personGender">
+            <option value="">Gender…</option>
+            <option value="F">Woman</option>
+            <option value="M">Man</option>
+            <option value="Other">Other</option>
+          </select>
+          <label><input type="checkbox" id="personLeader"> Leader</label>
+          <label><input type="checkbox" id="personDriver"> Driver</label>
+          <button class="btn" id="addPersonBtn">Add person</button>
+        </div>
+        <table id="peopleTable">
+          <thead><tr><th>Name</th><th>Gender</th><th>Leader</th><th>Driver</th><th>Active</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="view-dutydays" class="view">
+      <div class="panel">
+        <h2>Duty Days</h2>
+        <p style="color:var(--muted);font-size:0.9rem">
+          Every Saturday, the final Friday, and the Sunday before a bank holiday Monday are suggested automatically.
+          Click any date to toggle it on/off.
+        </p>
+        <div class="month-nav">
+          <button class="btn secondary" id="dutyPrevMonth">‹</button>
+          <h2 id="dutyMonthLabel"></h2>
+          <button class="btn secondary" id="dutyNextMonth">›</button>
+        </div>
+        <div id="dutyCalendar" class="calendar-grid"></div>
+        <div style="margin-top:1rem">
+          <button class="btn" id="saveDutyDaysBtn">Save duty days</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-availability" class="view">
+      <div class="panel">
+        <h2>Availability</h2>
+        <div class="legend">
+          <span><span class="swatch" style="background:var(--lvl-available)"></span>Available</span>
+          <span><span class="swatch" style="background:var(--lvl-maybe)"></span>Maybe</span>
+          <span><span class="swatch" style="background:var(--lvl-reluctant)"></span>Prefer not to</span>
+          <span><span class="swatch" style="background:var(--lvl-unavailable)"></span>Unavailable</span>
+          <span><span class="swatch" style="background:var(--lvl-forced)"></span>Forced (must do)</span>
+        </div>
+        <p style="color:var(--muted);font-size:0.85rem">Click a cell to cycle through levels. Save the duty days for this month first.</p>
+        <div class="avail-grid-wrap">
+          <table id="availTable"></table>
+        </div>
+        <div style="margin-top:1rem">
+          <button class="btn" id="saveAvailabilityBtn">Save availability</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-generate" class="view">
+      <div class="panel">
+        <h2>Generate Rota</h2>
+        <label>Max duties per person this month: <input type="number" id="maxPerMonth" value="2" min="1" max="10" style="width:4rem"></label>
+        <button class="btn" id="generateBtn" style="margin-left:1rem">Generate candidates</button>
+        <div id="candidatesList" style="margin-top:1rem"></div>
+      </div>
+    </section>
+
+    <section id="view-rota" class="view">
+      <div class="panel">
+        <h2 id="rotaHeading">Committed Rota</h2>
+        <div>
+          <button class="btn secondary" id="copyRotaListBtn">Copy as list (plain text)</button>
+          <button class="btn secondary" id="copyRotaCalendarBtn">Copy as calendar (for email)</button>
+        </div>
+        <div id="rotaList" style="margin-top:1rem"></div>
+        <h3>Calendar view</h3>
+        <div id="rotaCalendar" class="calendar-grid"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="core.js?v=1"></script>
+</body>
+</html>
