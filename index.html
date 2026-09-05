@@ -8,8 +8,13 @@
 <script>
   // Fill these in — see apps-script/SETUP.md.
   window.SSP_CONFIG = {
-    APPS_SCRIPT_URL: "PASTE_APPS_SCRIPT_WEB_APP_URL_HERE",
-    GOOGLE_CLIENT_ID: "PASTE_GOOGLE_OAUTH_CLIENT_ID_HERE", // leave blank to hide the Google sign-in button
+    APPS_SCRIPT_URL: "https://script.google.com/macros/s/AKfycbxcoVemLPKA-h_WRek8lWiPGlh8kp_W3gV7ekiIQHEsWhaCchC186l2THuE1ji7fkxFyg/exec",
+    // Reused from leaflet-map: an OAuth "origin" is scheme+host only, not
+    // path, so this client (authorised for https://daemeous.github.io)
+    // already covers this site too, whatever path it's served from under
+    // that same GitHub Pages account. See apps-script/SETUP.md if you'd
+    // rather use a separate client ID.
+    GOOGLE_CLIENT_ID: "580224381168-i67a13m72bvlpq8rtkhnjk15tic4k9e1.apps.googleusercontent.com",
     TITLE: "SSP Rota",
   };
 </script>

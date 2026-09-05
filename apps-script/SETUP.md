@@ -11,9 +11,9 @@ One-time setup to stand up the backend this site talks to.
    | Key | Value |
    |---|---|
    | `ADMIN_EMAILS` | Comma-separated Google account emails allowed to sign in as admin, e.g. `jane@gmail.com,dave@gmail.com` |
-   | `GOOGLE_CLIENT_ID` | An OAuth Client ID (Web application) from the [Google Cloud Console credentials page](https://console.cloud.google.com/apis/credentials), used for the Google Sign-In button. Same value goes into `index.html`'s config block. |
+   | `GOOGLE_CLIENT_ID` | Must match `index.html`'s `GOOGLE_CLIENT_ID` exactly — the backend rejects any Google token not issued to this client. This repo's `index.html` ships with the same shared client ID the leaflet-map deployments use (`580224381168-i67a13m72bvlpq8rtkhnjk15tic4k9e1.apps.googleusercontent.com`) — reusable here because an OAuth "authorised origin" is scheme+host only (`https://daemeous.github.io`), not path, so it already covers any repo served from that same GitHub Pages account. Only get your own from the [Google Cloud Console credentials page](https://console.cloud.google.com/apis/credentials) if you want a separate client (e.g. a different GitHub Pages account). |
 
-   Leave `ADMIN_EMAILS` blank (or set it to just the emails you want) if you're only using the shared password to sign in — Google sign-in and the shared password are independent, either gets you in.
+   Leave `ADMIN_EMAILS` blank if you're only using the shared password to sign in — Google sign-in and the shared password are independent, either gets you in.
 
 4. **Set the shared admin password.** Still in the Apps Script editor, open the function dropdown (top toolbar) next to "Debug", select `setPasswordFromPrompt`, and click **Run**. The first run will ask you to authorise the script (it needs to read/write this Sheet and call Google's token-info endpoint) — approve it, then run it again. A dialog box asks for the new password; type it there. The password itself is never written to any file — only a salted hash is stored in the script's own Properties.
 
