@@ -1,12 +1,18 @@
 :root {
-  --bg: #f4f5f7;
-  --panel: #ffffff;
-  --border: #d9dce1;
-  --text: #1c2126;
-  --muted: #6b7280;
-  --accent: #2f6fed;
-  --accent-text: #ffffff;
-  --danger: #c0392b;
+  /* White on blue, straight from the rota doc: #1b3ca8 fill, #ffffff text.
+     --panel reuses that exact fill; --bg is the same blue mixed 25% toward
+     black so panels still read as raised cards against it. */
+  --brand-blue: #1b3ca8;
+  --bg: #142d7e;
+  --panel: #1b3ca8;
+  --panel-alt: #17338f;
+  --border: rgba(255, 255, 255, 0.28);
+  --text: #ffffff;
+  --muted: rgba(255, 255, 255, 0.68);
+  --accent: #ffffff;
+  --accent-text: #1b3ca8;
+  --danger: #ff8a80;
+  --danger-solid: #c0392b;
 
   --lvl-available: #3fa34d;
   --lvl-maybe: #e0b400;
@@ -101,7 +107,7 @@ button.btn {
 }
 
 button.btn.secondary { background: none; color: var(--accent); border: 1px solid var(--accent); }
-button.btn.danger { background: var(--danger); }
+button.btn.danger { background: var(--danger-solid); color: #ffffff; }
 button.btn:disabled { opacity: 0.5; cursor: default; }
 
 input[type=text], input[type=password], input[type=number], select {
@@ -109,8 +115,10 @@ input[type=text], input[type=password], input[type=number], select {
   padding: 0.4rem 0.6rem;
   border: 1px solid var(--border);
   border-radius: 6px;
+  background: #ffffff;
+  color: #14142b;
 }
-input[type=checkbox] { width: 1.2rem; height: 1.2rem; }
+input[type=checkbox] { width: 1.2rem; height: 1.2rem; accent-color: var(--brand-blue); }
 
 table { border-collapse: collapse; width: 100%; }
 th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
@@ -148,11 +156,11 @@ th { color: var(--muted); font-weight: 600; white-space: nowrap; }
   padding: 0.35rem;
   font-size: 0.8rem;
   cursor: pointer;
-  background: #fafbfc;
+  background: var(--panel-alt);
   overflow: hidden;
 }
 .calendar-grid .day.empty { visibility: hidden; }
-.calendar-grid .day.duty { background: #eaf1ff; border-color: var(--accent); }
+.calendar-grid .day.duty { background: rgba(255, 255, 255, 0.22); border-color: var(--accent); }
 .calendar-grid .day .num { font-weight: 600; }
 .calendar-grid .day .names { margin-top: 0.25rem; line-height: 1.25; }
 .calendar-grid .day.no-duty .names { color: var(--muted); font-style: italic; }
@@ -205,7 +213,7 @@ th { color: var(--muted); font-weight: 600; white-space: nowrap; }
 .slot-editor select { min-height: 38px; max-width: 100%; }
 
 .msg { padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.85rem; margin-bottom: 0.75rem; }
-.msg.error { background: #fdecea; color: var(--danger); }
+.msg.error { background: #fdecea; color: var(--danger-solid); }
 .msg.success { background: #e9f7ec; color: #1e7b34; }
 
 .people-form { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-bottom: 1rem; }
