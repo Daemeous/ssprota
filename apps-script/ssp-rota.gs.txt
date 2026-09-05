@@ -271,7 +271,7 @@ function handleSaveDutyDays(body, session) {
   const all = sheet.getDataRange().getValues();
   const keep = [all[0]]; // header
   for (let i = 1; i < all.length; i++) {
-    if (all[i][0] !== month) keep.push(all[i]);
+    if (normMonth(all[i][0]) !== month) keep.push(all[i]);
   }
   dates.forEach(date => keep.push([month, date, true]));
   sheet.clear();
@@ -297,18 +297,16 @@ function handleSaveAvailability(body, session) {
   const sheet = getSheet(AVAILABILITY_SHEET, ["month", "date", "personId", "level"]);
   const all = sheet.getDataRange().getValues();
   const keyOf = (m, d, p) => m + "|" + d + "|" + p;
-  const byKey = {};
   const keep = [all[0]];
   for (let i = 1; i < all.length; i++) {
-    if (all[i][0] === month) { byKey[keyOf(all[i][0], all[i][1], all[i][2])] = i; continue; }
-    keep.push(all[i]);
+    if (normMonth(all[i][0]) !== month) keep.push(all[i]);
   }
   const monthMap = {};
   entries.forEach(e => { monthMap[keyOf(month, e.date, e.personId)] = [month, e.date, e.personId, e.level]; });
   // start from existing month rows not overwritten, then apply the new entries
   for (let i = 1; i < all.length; i++) {
-    if (all[i][0] !== month) continue;
-    const key = keyOf(all[i][0], all[i][1], all[i][2]);
+    if (normMonth(all[i][0]) !== month) continue;
+    const key = keyOf(month, normDate(all[i][1]), all[i][2]);
     if (!monthMap[key]) keep.push(all[i]);
   }
   Object.values(monthMap).forEach(row => keep.push(row));
@@ -333,7 +331,7 @@ function handleCommitAssignments(body, session) {
   const all = sheet.getDataRange().getValues();
   const keep = [all[0]];
   for (let i = 1; i < all.length; i++) {
-    if (!dates.includes(all[i][0])) keep.push(all[i]);
+    if (!dates.includes(normDate(all[i][0]))) keep.push(all[i]);
   }
   const now = new Date().toISOString();
   assignments.forEach(a => keep.push([a.date, a.personId, a.source || "solver", now, session]));
@@ -351,7 +349,7 @@ function handleSetAssignment(body, session) {
   let found = false;
   const now = new Date().toISOString();
   for (let i = 1; i < all.length; i++) {
-    if (all[i][0] === date && all[i][1] === oldPersonId) {
+    if (normDate(all[i][0]) === date && all[i][1] === oldPersonId) {
       sheet.getRange(i + 1, 1, 1, 5).setValues([[date, newPersonId, "manual", now, session]]);
       found = true;
       break;
@@ -547,9 +545,33 @@ function readRows(sheet) {
   const header = values[0];
   return values.slice(1).filter(r => r.some(c => c !== "")).map(r => {
     const obj = {};
-    header.forEach((h, i) => obj[h] = r[i]);
+    header.forEach((h, i) => {
+      let v = r[i];
+      if (h === "date") v = normDate(v);
+      else if (h === "month") v = normMonth(v);
+      obj[h] = v;
+    });
     return obj;
   });
+}
+
+// Sheets auto-detects text that looks like a date (including a bare
+// "YYYY-MM" or "YYYY-MM-DD") when it's written via setValues, silently
+// turning what we stored as a string into an actual Date cell. Every
+// column named "date"/"month" gets read back through these so a strict
+// string comparison elsewhere (r.month === "2026-09") still matches
+// regardless of which representation the cell ended up as — read once
+// through readRows() and it's consistent everywhere; the raw-array
+// dedup/lookup loops below call these directly since they read the sheet
+// without going through readRows().
+function normDate(v) {
+  return v instanceof Date ? Utilities.formatDate(v, spreadsheetTz(), "yyyy-MM-dd") : v;
+}
+function normMonth(v) {
+  return v instanceof Date ? Utilities.formatDate(v, spreadsheetTz(), "yyyy-MM") : v;
+}
+function spreadsheetTz() {
+  return SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
 }
 
 function truthy(v) { return v === true || v === "TRUE" || v === "true"; }
