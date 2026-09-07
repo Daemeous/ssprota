@@ -34,7 +34,6 @@ const ASSIGNMENTS_SHEET = "Assignments";
 const CHANGELOG_SHEET = "Changelog";
 
 const LEVELS = ["available", "maybe", "reluctant", "unavailable", "forced"];
-const MAX_PER_MONTH_DEFAULT = 2;
 
 // ── POST handler ─────────────────────────────────────────────────────────
 function doPost(e) {
@@ -318,44 +317,57 @@ function handleSaveAvailability(body, session) {
 }
 
 // ── Assignments ──────────────────────────────────────────────────────────
+// isLeader (col F) records who was standing in as leader for that specific
+// night — a per-assignment fact, not the person's general isLeader
+// qualification on the People sheet. ensureHeaderColumn migrates any
+// Assignments sheet created before this column existed, so nothing manual
+// is needed on an existing deployment.
 function handleGetAssignments(body) {
-  const sheet = getSheet(ASSIGNMENTS_SHEET, ["date", "personId", "source", "committedAt", "committedBy"]);
-  const rows = readRows(sheet).filter(r => r.date >= body.monthStart && r.date <= body.monthEnd);
+  const sheet = getSheet(ASSIGNMENTS_SHEET, ["date", "personId", "source", "committedAt", "committedBy", "isLeader"]);
+  ensureHeaderColumn(sheet, "isLeader");
+  const rows = readRows(sheet).filter(r => r.date >= body.monthStart && r.date <= body.monthEnd)
+    .map(r => Object.assign({}, r, { isLeader: truthy(r.isLeader) }));
   return jsonResp({ ok: true, assignments: rows });
 }
 
 function handleCommitAssignments(body, session) {
-  const assignments = Array.isArray(body.assignments) ? body.assignments : []; // [{date, personId}]
+  const assignments = Array.isArray(body.assignments) ? body.assignments : []; // [{date, personId, source, isLeader}]
   const dates = [...new Set(assignments.map(a => a.date))];
-  const sheet = getSheet(ASSIGNMENTS_SHEET, ["date", "personId", "source", "committedAt", "committedBy"]);
+  const sheet = getSheet(ASSIGNMENTS_SHEET, ["date", "personId", "source", "committedAt", "committedBy", "isLeader"]);
+  ensureHeaderColumn(sheet, "isLeader");
   const all = sheet.getDataRange().getValues();
   const keep = [all[0]];
   for (let i = 1; i < all.length; i++) {
     if (!dates.includes(normDate(all[i][0]))) keep.push(all[i]);
   }
   const now = new Date().toISOString();
-  assignments.forEach(a => keep.push([a.date, a.personId, a.source || "solver", now, session]));
+  assignments.forEach(a => keep.push([a.date, a.personId, a.source || "solver", now, session, !!a.isLeader]));
   sheet.clear();
-  sheet.getRange(1, 1, keep.length, 5).setValues(keep);
+  sheet.getRange(1, 1, keep.length, 6).setValues(keep);
   logChange("commitAssignments", dates.join(",") + " (" + assignments.length + " slots)", session);
   return jsonResp({ ok: true });
 }
 
 // Manual single-slot tweak after commit: replace one person on one date.
+// Keeps whichever leader designation the slot already had — swapping in a
+// replacement doesn't change who's marked as leader that night; fix that
+// directly in the sheet if the new person shouldn't inherit it.
 function handleSetAssignment(body, session) {
   const date = body.date, oldPersonId = body.oldPersonId, newPersonId = body.newPersonId;
-  const sheet = getSheet(ASSIGNMENTS_SHEET, ["date", "personId", "source", "committedAt", "committedBy"]);
+  const sheet = getSheet(ASSIGNMENTS_SHEET, ["date", "personId", "source", "committedAt", "committedBy", "isLeader"]);
+  ensureHeaderColumn(sheet, "isLeader");
   const all = sheet.getDataRange().getValues();
   let found = false;
   const now = new Date().toISOString();
   for (let i = 1; i < all.length; i++) {
     if (normDate(all[i][0]) === date && all[i][1] === oldPersonId) {
-      sheet.getRange(i + 1, 1, 1, 5).setValues([[date, newPersonId, "manual", now, session]]);
+      const preservedIsLeader = all[i][5];
+      sheet.getRange(i + 1, 1, 1, 6).setValues([[date, newPersonId, "manual", now, session, preservedIsLeader]]);
       found = true;
       break;
     }
   }
-  if (!found) sheet.appendRow([date, newPersonId, "manual", now, session]);
+  if (!found) sheet.appendRow([date, newPersonId, "manual", now, session, false]);
   logChange("setAssignment", date + ": " + oldPersonId + " -> " + newPersonId, session);
   return jsonResp({ ok: true });
 }
@@ -363,15 +375,22 @@ function handleSetAssignment(body, session) {
 // ── Rota generation ──────────────────────────────────────────────────────
 // Produces up to `count` distinct, ranked candidate rotas for the given
 // duty dates. Hard requirements per date: exactly 3 distinct people, none
-// "unavailable", at least one isLeader and at least one isDriver (the same
-// person may cover both), and anyone marked "forced" for that date must be
-// included. Soft-scored (lower is better): availability level, monthly
-// duty count beyond the cap, and being on duty exactly a week after a
-// previous duty in this same run.
+// "unavailable", at least one isLeader, at least one isDriver, and at
+// least one man (the same person may cover more than one of those), plus
+// anyone marked "forced" (locked in) for that date must be included. A
+// date that can't meet all of that — e.g. the only people left are two
+// women with no man available — is left as No Duty rather than forced.
+//
+// Everyone is aimed at 2 duties a month at most (no penalty for a 1st or
+// 2nd). A 3rd is used automatically, at a moderate cost, when it's the
+// only way to fill a date that would otherwise be empty — that's normal,
+// not flagged. A 4th is heavily penalised and only ever appears in the
+// separate "extended" pass below, surfaced as one extra candidate with a
+// warning, alongside the standard (<=3/month) candidates rather than in
+// place of them.
 function handleGenerateRota(body) {
   const month = String(body.month);
   const dutyDates = (Array.isArray(body.dates) ? body.dates : []).slice().sort();
-  const maxPerMonth = Number(body.maxPerMonth) || MAX_PER_MONTH_DEFAULT;
   const candidateCount = Math.min(Number(body.count) || 5, 10);
 
   const people = readRows(getSheet(PEOPLE_SHEET, ["id", "name", "gender", "isLeader", "isDriver", "active"]))
@@ -388,41 +407,75 @@ function handleGenerateRota(body) {
   });
   const levelOf = (date, personId) => (availability[date] && availability[date][personId]) || "unavailable";
 
-  const results = [];
-  const seenKeys = new Set();
+  const STANDARD_CAP = 3;
+  const EXTENDED_CAP = 4;
   const ATTEMPTS = 60;
+  const filledCount = r => dutyDates.filter(d => (r.assignments[d] || []).length === 3).length;
 
-  for (let attempt = 0; attempt < ATTEMPTS && results.length < candidateCount * 4; attempt++) {
-    const built = buildCandidate(dutyDates, people, levelOf, maxPerMonth, attempt);
-    if (!built) continue;
-    const key = dutyDates.map(d => (built.assignments[d] || []).slice().sort().join(",")).join("|");
-    if (seenKeys.has(key)) continue;
-    seenKeys.add(key);
-    results.push(built);
+  function generate(capPerMonth) {
+    const results = [];
+    const seenKeys = new Set();
+    for (let attempt = 0; attempt < ATTEMPTS && results.length < candidateCount * 4; attempt++) {
+      const built = buildCandidate(dutyDates, people, levelOf, capPerMonth, attempt);
+      const key = dutyDates.map(d => (built.assignments[d] || []).slice().sort().join(",")).join("|");
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      results.push(built);
+    }
+    results.sort((a, b) => a.penalty - b.penalty);
+    return results;
   }
 
-  results.sort((a, b) => a.penalty - b.penalty);
-  const top = results.slice(0, candidateCount).map((r, i) => ({
-    rank: i + 1,
-    penalty: r.penalty,
-    issues: r.issues,
-    dates: dutyDates.map(date => ({
-      date,
-      people: (r.assignments[date] || []).map(id => ({
-        id, name: peopleById[id] ? peopleById[id].name : "?",
-        gender: peopleById[id] ? peopleById[id].gender : "",
-        level: levelOf(date, id)
+  const standard = generate(STANDARD_CAP);
+  const bestStandardFill = standard.length ? Math.max(...standard.map(filledCount)) : 0;
+
+  // Only bother with the 4-duty pass, and only surface it, if it actually
+  // unlocks a date the standard (<=3) pass couldn't fill at all.
+  let extendedEntry = null;
+  const extended = generate(EXTENDED_CAP);
+  if (extended.length) {
+    const bestExtendedFill = Math.max(...extended.map(filledCount));
+    if (bestExtendedFill > bestStandardFill) {
+      const best = extended.filter(r => filledCount(r) === bestExtendedFill).sort((a, b) => a.penalty - b.penalty)[0];
+      const counts = {};
+      dutyDates.forEach(date => (best.assignments[date] || []).forEach(id => counts[id] = (counts[id] || 0) + 1));
+      const pushedPeople = Object.keys(counts).filter(id => counts[id] >= 4).map(id => ({ id, name: peopleById[id] ? peopleById[id].name : id }));
+      const newlyFilledDates = dutyDates.filter(d =>
+        (best.assignments[d] || []).length === 3 && !standard.some(r => (r.assignments[d] || []).length === 3));
+      extendedEntry = { result: best, warning: { people: pushedPeople, dates: newlyFilledDates } };
+    }
+  }
+
+  const combined = standard.slice(0, candidateCount).map(r => ({ result: r, warning: null }));
+  if (extendedEntry) combined.push(extendedEntry);
+
+  const top = combined.map((entry, i) => {
+    const r = entry.result;
+    return {
+      rank: i + 1,
+      penalty: r.penalty,
+      issues: r.issues,
+      warning: entry.warning,
+      dates: dutyDates.map(date => ({
+        date,
+        people: (r.assignments[date] || []).map(id => ({
+          id, name: peopleById[id] ? peopleById[id].name : "?",
+          gender: peopleById[id] ? peopleById[id].gender : "",
+          level: levelOf(date, id),
+          isLeader: id === r.leaderOf[date]
+        }))
       }))
-    }))
-  }));
+    };
+  });
 
   return jsonResp({ ok: true, candidates: top });
 }
 
-function buildCandidate(dutyDates, people, levelOf, maxPerMonth, seed) {
+function buildCandidate(dutyDates, people, levelOf, capPerMonth, seed) {
   const rng = mulberry32(seed * 2654435761 + 1);
   const order = shuffle(dutyDates.slice(), rng);
   const assignments = {};
+  const leaderOf = {};
   const monthCount = {}; // personId -> duties assigned so far in this candidate
   const lastDutyDate = {}; // personId -> most recent assigned date (ISO)
   const issues = [];
@@ -435,7 +488,8 @@ function buildCandidate(dutyDates, people, levelOf, maxPerMonth, seed) {
     const candidates = people
       .filter(p => !picks.includes(p.id))
       .filter(p => levelOf(date, p.id) !== "unavailable")
-      .map(p => ({ p, cost: slotCost(p, date, levelOf, monthCount, lastDutyDate, maxPerMonth, rng) }))
+      .filter(p => (monthCount[p.id] || 0) < capPerMonth)
+      .map(p => ({ p, cost: slotCost(p, date, levelOf, monthCount, lastDutyDate, rng) }))
       .sort((a, b) => a.cost - b.cost);
 
     while (picks.length < 3 && candidates.length) {
@@ -444,52 +498,74 @@ function buildCandidate(dutyDates, people, levelOf, maxPerMonth, seed) {
       picks.push(candidates.splice(idx, 1)[0].p.id);
     }
 
-    if (picks.length < 3) issues.push({ date, problem: "Only " + picks.length + " available person(s) for this date." });
+    let pickedPeople = picks.map(id => people.find(p => p.id === id)).filter(Boolean);
+    [p => p.isLeader, p => p.isDriver, p => p.gender === "M"].forEach(predicate => {
+      if (pickedPeople.some(predicate)) return;
+      const swapped = trySwapForRole(picks, people, date, levelOf, monthCount, capPerMonth, predicate);
+      if (swapped) { picks = swapped; pickedPeople = picks.map(id => people.find(p => p.id === id)).filter(Boolean); }
+    });
 
-    const pickedPeople = picks.map(id => people.find(p => p.id === id)).filter(Boolean);
-    if (!pickedPeople.some(p => p.isLeader)) {
-      const swapped = trySwapForRole(picks, pickedPeople, people, date, levelOf, "isLeader");
-      if (swapped) picks = swapped; else issues.push({ date, problem: "No leader available for this date." });
-    }
-    if (!picks.map(id => people.find(p => p.id === id)).filter(Boolean).some(p => p.isDriver)) {
-      const swapped2 = trySwapForRole(picks, picks.map(id => people.find(p => p.id === id)), people, date, levelOf, "isDriver");
-      if (swapped2) picks = swapped2; else issues.push({ date, problem: "No driver available for this date." });
+    const viable = picks.length === 3 && pickedPeople.length === 3
+      && pickedPeople.some(p => p.isLeader) && pickedPeople.some(p => p.isDriver) && pickedPeople.some(p => p.gender === "M");
+
+    if (!viable) {
+      const reason = picks.length < 3
+        ? "Not enough eligible people for this date."
+        : !pickedPeople.some(p => p.gender === "M")
+          ? "No man available among those eligible — left as No Duty rather than an all-women group."
+          : !pickedPeople.some(p => p.isLeader) ? "No leader available for this date."
+          : "No driver available for this date.";
+      issues.push({ date, problem: reason });
+      assignments[date] = [];
+      return; // leave this date as No Duty; doesn't touch monthCount/lastDutyDate
     }
 
+    const leader = pickedPeople.find(p => p.isLeader);
+    leaderOf[date] = leader.id;
     assignments[date] = picks;
     picks.forEach(id => {
       const level = levelOf(date, id);
       penalty += levelPenalty(level);
       monthCount[id] = (monthCount[id] || 0) + 1;
-      if (monthCount[id] > maxPerMonth) penalty += (monthCount[id] - maxPerMonth) * 8;
+      penalty += monthlyCountPenalty(monthCount[id]);
       if (lastDutyDate[id] && daysBetween(lastDutyDate[id], date) === 7) penalty += 6;
       lastDutyDate[id] = date;
     });
-    if (!pickedPeople.concat(picks.map(id => people.find(p => p.id === id))).some(p => p && p.gender && /^f/i.test(p.gender))) {
+    if (!pickedPeople.some(p => p.gender && /^f/i.test(p.gender))) {
       penalty += 3; // soft: prefer at least one woman, but never a hard-fail
     }
   });
 
-  penalty += issues.length * 20; // heavily discourage candidates with unresolved hard-constraint gaps
-  return { assignments, penalty, issues };
+  penalty += issues.length * 25; // leaving a fillable date empty still costs more than a single 3rd duty
+  return { assignments, penalty, issues, leaderOf };
 }
 
-function slotCost(person, date, levelOf, monthCount, lastDutyDate, maxPerMonth, rng) {
+// 1st/2nd duty this month: free. 3rd: noticeable but worth it rather than
+// leaving a date empty. 4th: heavy — only the EXTENDED_CAP pass ever lets
+// anyone reach it, and only when nothing else fills that extra date.
+function monthlyCountPenalty(count) {
+  if (count <= 2) return 0;
+  if (count === 3) return 12;
+  if (count === 4) return 60;
+  return 300;
+}
+
+function slotCost(person, date, levelOf, monthCount, lastDutyDate, rng) {
   let cost = levelPenalty(levelOf(date, person.id));
-  const count = monthCount[person.id] || 0;
-  if (count >= maxPerMonth) cost += (count - maxPerMonth + 1) * 8;
+  cost += monthlyCountPenalty((monthCount[person.id] || 0) + 1); // as if this pick goes ahead
   if (lastDutyDate[person.id] && daysBetween(lastDutyDate[person.id], date) === 7) cost += 6;
   return cost + rng() * 0.5; // small jitter so equal-cost ties don't always resolve the same way
 }
 
-function trySwapForRole(picks, pickedPeople, people, date, levelOf, roleFlag) {
-  const roleHolders = people.filter(p => p[roleFlag] && levelOf(date, p.id) !== "unavailable" && !picks.includes(p.id));
-  if (!roleHolders.length) return null;
+function trySwapForRole(picks, people, date, levelOf, monthCount, capPerMonth, predicate) {
+  const holders = people.filter(p =>
+    predicate(p) && levelOf(date, p.id) !== "unavailable" && !picks.includes(p.id) && (monthCount[p.id] || 0) < capPerMonth);
+  if (!holders.length) return null;
   // Replace the current pick with the highest (worst) availability penalty to make room.
   const worstIdx = picks
     .map((id, i) => ({ i, cost: levelPenalty(levelOf(date, id)) }))
     .sort((a, b) => b.cost - a.cost)[0].i;
-  const replacement = roleHolders.sort((a, b) => levelPenalty(levelOf(date, a.id)) - levelPenalty(levelOf(date, b.id)))[0];
+  const replacement = holders.sort((a, b) => levelPenalty(levelOf(date, a.id)) - levelPenalty(levelOf(date, b.id)))[0];
   const next = picks.slice();
   next[worstIdx] = replacement.id;
   return next;
@@ -537,6 +613,17 @@ function getSheet(name, header) {
     sheet.appendRow(header);
   }
   return sheet;
+}
+
+// Adds colName as a new header cell if a sheet created before that column
+// existed doesn't already have it — a one-line migration so an existing
+// deployment doesn't need any manual spreadsheet surgery.
+function ensureHeaderColumn(sheet, colName) {
+  const lastCol = Math.max(sheet.getLastColumn(), 1);
+  const header = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  if (header.indexOf(colName) === -1) {
+    sheet.getRange(1, lastCol + 1).setValue(colName);
+  }
 }
 
 function readRows(sheet) {

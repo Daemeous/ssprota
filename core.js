@@ -306,12 +306,19 @@
   });
 
   // ── Generate rota ────────────────────────────────────────────────────────
+  // Leader formatting: bold + underline, matching how the paper rota marked
+  // it — used everywhere names are listed (candidates, committed rota, and
+  // both "copy for email" exports).
+  function nameHtml(p) {
+    const safe = escapeHtml(p.name);
+    return p.isLeader ? `<strong><u>${safe}</u></strong>` : safe;
+  }
+
   document.getElementById("generateBtn").addEventListener("click", async () => {
     if (!state.dutyDates.size) await loadDutyDays();
     const dates = [...state.dutyDates].sort();
-    const maxPerMonth = Number(document.getElementById("maxPerMonth").value) || 2;
     document.getElementById("candidatesList").innerHTML = "Generating…";
-    const data = await api("generateRota", { month: state.month, dates, maxPerMonth, count: 5 });
+    const data = await api("generateRota", { month: state.month, dates, count: 5 });
     if (!data.ok) { document.getElementById("candidatesList").innerHTML = ""; return showMsg("globalMsg", data.error, "error"); }
     state.candidates = data.candidates;
     renderCandidates();
@@ -322,14 +329,18 @@
     if (!state.candidates.length) { el.innerHTML = "<p>No candidates could be generated — check availability and duty days.</p>"; return; }
     el.innerHTML = state.candidates.map((c, i) => {
       const issues = c.issues.length ? `<div class="issues">⚠ ${c.issues.map(x => `${formatDateLabel(x.date)}: ${escapeHtml(x.problem)}`).join(" · ")}</div>` : "";
+      const warning = c.warning
+        ? `<div class="issues">⚠ Needs ${escapeHtml(c.warning.people.map(p => p.name).join(" and ") || "someone")} to take a 4th duty this month, to also cover ${escapeHtml(c.warning.dates.map(formatDateLabel).join(", ") || "an extra date")}.</div>`
+        : "";
       const rows = displayDatesOf(state.month, new Set(c.dates.map(d => d.date))).map(date => {
         const match = c.dates.find(d => d.date === date);
-        const names = match && match.people.length ? match.people.map(p => p.name).join(", ") : null;
+        const names = match && match.people.length ? match.people.map(nameHtml).join(", ") : null;
         return `<div class="rota-list-row ${names ? "" : "no-duty"}"><span>${formatDateLabel(date)}</span><span class="names">${names || "No Duty"}</span></div>`;
       }).join("");
       return `<div class="candidate-card">
-        <h3>Option ${i + 1}${i === 0 ? " (best fit)" : ""}</h3>
+        <h3>Option ${i + 1}${i === 0 && !c.warning ? " (best fit)" : ""}</h3>
         <div class="meta">Suitability score: ${c.penalty.toFixed(1)} (lower is better)</div>
+        ${warning}
         ${issues}
         ${rows}
         <button class="btn" style="margin-top:0.75rem" data-commit="${i}">Commit this rota</button>
@@ -339,7 +350,7 @@
       btn.addEventListener("click", async () => {
         const candidate = state.candidates[Number(btn.dataset.commit)];
         const assignments = [];
-        candidate.dates.forEach(d => d.people.forEach(p => assignments.push({ date: d.date, personId: p.id, source: "solver" })));
+        candidate.dates.forEach(d => d.people.forEach(p => assignments.push({ date: d.date, personId: p.id, source: "solver", isLeader: p.isLeader })));
         const data = await api("commitAssignments", { assignments });
         showMsg("globalMsg", data.ok ? "Rota committed." : data.error, data.ok ? "success" : "error");
         if (data.ok) document.querySelector('nav.tabs button[data-view="rota"]').click();
@@ -348,6 +359,9 @@
   }
 
   // ── Committed rota ───────────────────────────────────────────────────────
+  // state.assignments[date] is an array of {id, isLeader} — isLeader is who
+  // was standing in as leader that specific night (persisted per-assignment
+  // in the sheet), not the person's general leader qualification.
   async function loadRota() {
     const { start, end } = monthBounds(state.month);
     document.getElementById("rotaHeading").textContent = monthLabel(state.month) + " Rota";
@@ -355,7 +369,7 @@
     state.assignments = {};
     if (data.ok) data.assignments.forEach(a => {
       state.assignments[a.date] = state.assignments[a.date] || [];
-      state.assignments[a.date].push(a.personId);
+      state.assignments[a.date].push({ id: a.personId, isLeader: a.isLeader });
     });
     renderRotaList();
     renderRotaCalendar();
@@ -366,16 +380,20 @@
     return p ? p.name : "?";
   }
 
+  function assignmentNameHtml(a) {
+    return nameHtml({ name: personName(a.id), isLeader: a.isLeader });
+  }
+
   function renderRotaList() {
     const dates = displayDatesOf(state.month, new Set(Object.keys(state.assignments)));
     document.getElementById("rotaList").innerHTML = dates.map(date => {
-      const ids = state.assignments[date] || [];
-      const names = ids.length ? ids.map(personName).join(", ") : null;
+      const assigned = state.assignments[date] || [];
+      const names = assigned.length ? assigned.map(assignmentNameHtml).join(", ") : null;
       let editor = "";
-      if (ids.length) {
-        editor = `<div class="slot-editor">` + ids.map(id => `
-          <select data-date="${date}" data-old="${id}">
-            ${state.people.filter(p => p.active).map(p => `<option value="${p.id}" ${p.id === id ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
+      if (assigned.length) {
+        editor = `<div class="slot-editor">` + assigned.map(a => `
+          <select data-date="${date}" data-old="${a.id}">
+            ${state.people.filter(p => p.active).map(p => `<option value="${p.id}" ${p.id === a.id ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
           </select>
         `).join("") + `</div>`;
       }
@@ -402,38 +420,52 @@
     for (let i = 0; i < firstDow; i++) { const div = document.createElement("div"); div.className = "day empty"; el.appendChild(div); }
     for (let d = 1; d <= daysInMonth; d++) {
       const iso = isoDate(new Date(year, mon - 1, d));
-      const ids = state.assignments[iso];
+      const assigned = state.assignments[iso];
       const div = document.createElement("div");
-      div.className = "day" + (ids && ids.length ? " duty" : " no-duty");
-      div.innerHTML = `<div class="num">${d}</div><div class="names">${ids && ids.length ? ids.map(personName).join(", ") : ""}</div>`;
+      div.className = "day" + (assigned && assigned.length ? " duty" : " no-duty");
+      div.innerHTML = `<div class="num">${d}</div><div class="names">${assigned && assigned.length ? assigned.map(assignmentNameHtml).join(", ") : ""}</div>`;
       el.appendChild(div);
     }
   }
 
   // ── Copy for email ───────────────────────────────────────────────────────
+  // Both buttons copy rich text (HTML, with a plain-text fallback for
+  // clients/browsers that can't take it) so the leader's bold+underline
+  // survives the paste — true plain text has no way to represent that.
   document.getElementById("copyRotaListBtn").addEventListener("click", () => {
-    const dates = displayDatesOf(state.month, new Set(Object.keys(state.assignments)));
-    const text = `${monthLabel(state.month)} Rota\n\n` + dates.map(date => {
-      const ids = state.assignments[date] || [];
-      return `${formatDateLabel(date)}\n${ids.length ? ids.map(personName).join(", ") : "No Duty"}`;
-    }).join("\n\n");
-    copyPlainText(text);
-  });
-
-  document.getElementById("copyRotaCalendarBtn").addEventListener("click", () => {
-    const html = buildRotaEmailHtml();
+    const html = buildRotaListEmailHtml();
     copyRichText(html, htmlToPlainText(html));
   });
 
-  function buildRotaEmailHtml() {
+  document.getElementById("copyRotaCalendarBtn").addEventListener("click", () => {
+    const html = buildRotaCalendarEmailHtml();
+    copyRichText(html, htmlToPlainText(html));
+  });
+
+  function emailNameHtml(a) {
+    const safe = escapeHtml(personName(a.id));
+    return a.isLeader ? `<b><u>${safe}</u></b>` : safe;
+  }
+
+  function buildRotaListEmailHtml() {
+    const dates = displayDatesOf(state.month, new Set(Object.keys(state.assignments)));
+    const rows = dates.map(date => {
+      const assigned = state.assignments[date] || [];
+      const names = assigned.length ? assigned.map(emailNameHtml).join(", ") : "No Duty";
+      return `<p style="margin:0 0 2px"><b>${formatDateLabel(date)}</b></p><p style="margin:0 0 12px">${names}</p>`;
+    }).join("");
+    return `<div style="font-family:sans-serif"><h2>${monthLabel(state.month)} Rota</h2>${rows}</div>`;
+  }
+
+  function buildRotaCalendarEmailHtml() {
     const { year, mon, daysInMonth } = monthBounds(state.month);
     const firstDow = new Date(year, mon - 1, 1).getDay();
     let cells = "";
     for (let i = 0; i < firstDow; i++) cells += `<td style="border:1px solid #ccc;padding:6px"></td>`;
     for (let d = 1; d <= daysInMonth; d++) {
       const iso = isoDate(new Date(year, mon - 1, d));
-      const ids = state.assignments[iso];
-      const names = ids && ids.length ? ids.map(personName).join("<br>") : "";
+      const assigned = state.assignments[iso];
+      const names = assigned && assigned.length ? assigned.map(emailNameHtml).join("<br>") : "";
       cells += `<td style="border:1px solid #ccc;padding:6px;vertical-align:top;min-width:90px"><b>${d}</b><br>${names}</td>`;
       if ((firstDow + d) % 7 === 0) cells += "</tr><tr>";
     }

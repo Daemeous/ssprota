@@ -119,8 +119,8 @@
     <section id="view-generate" class="view">
       <div class="panel">
         <h2>Generate Rota</h2>
-        <label>Max duties per person this month: <input type="number" id="maxPerMonth" value="2" min="1" max="10" style="width:4rem"></label>
-        <button class="btn" id="generateBtn" style="margin-left:1rem">Generate candidates</button>
+        <p style="color:var(--muted);font-size:0.85rem">Aims for at most 2 duties per person this month, allows a 3rd automatically if that's the only way to fill a date, and only ever offers a 4th as a separate, clearly-flagged option alongside the rest.</p>
+        <button class="btn" id="generateBtn">Generate candidates</button>
         <div id="candidatesList" style="margin-top:1rem"></div>
       </div>
     </section>
@@ -129,7 +129,7 @@
       <div class="panel">
         <h2 id="rotaHeading">Committed Rota</h2>
         <div>
-          <button class="btn secondary" id="copyRotaListBtn">Copy as list (plain text)</button>
+          <button class="btn secondary" id="copyRotaListBtn">Copy as list (for email)</button>
           <button class="btn secondary" id="copyRotaCalendarBtn">Copy as calendar (for email)</button>
         </div>
         <div id="rotaList" style="margin-top:1rem"></div>
